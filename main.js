@@ -6859,6 +6859,23 @@ var TerminalView = class extends import_obsidian.ItemView {
           this.term?.writeln(`\r\n[Failed to start shell: ${err.message}]`);
         }
       }, 10);
+      // Defensive: on Windows, Obsidian's layout dispatch can crash silently
+      // during startup (recomputeChildrenDimensions errors), leaving xterm at
+      // stale dimensions without firing ResizeObserver or onLayoutChange.
+      // Schedule fixed-interval fits + PTY resizes so the terminal recovers
+      // even when no event listener fires.
+      [250, 750, 1500, 3000].forEach((delay) => {
+        setTimeout(() => {
+          if (this._isDisposed) return;
+          const dim = this.fitAddon?.proposeDimensions();
+          if (dim && dim.cols > 0 && dim.rows > 0) {
+            this.fit();
+            if (this.proc && !this.proc.killed) {
+              this.proc.stdin?.write(`\x1b]RESIZE;${dim.cols};${dim.rows}\x07`);
+            }
+          }
+        }, delay);
+      });
       this.setupEscapeHandler();
     } catch (err) {
       console.error("[Claude Sidebar] Failed to initialize terminal:", err);
