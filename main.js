@@ -7511,9 +7511,14 @@ var TerminalView = class extends import_obsidian.ItemView {
         // Windows Ctrl+V: paste from clipboard (Obsidian intercepts this before xterm sees it)
         if (ev.key === 'v' && ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
           ev.preventDefault();
-          navigator.clipboard.readText().then((text) => {
+          try {
+            const text = require('electron').clipboard.readText();
             if (text) this.term.paste(text);
-          }).catch(() => {});
+          } catch (_) {
+            navigator.clipboard.readText().then((text) => {
+              if (text) this.term.paste(text);
+            }).catch(() => {});
+          }
           return false;
         }
         // Windows Ctrl+C: copy selection or send interrupt
@@ -7521,7 +7526,11 @@ var TerminalView = class extends import_obsidian.ItemView {
           ev.preventDefault();
           const selection = this.term.getSelection();
           if (selection) {
-            navigator.clipboard.writeText(selection).catch(() => {});
+            try {
+              require('electron').clipboard.writeText(selection);
+            } catch (_) {
+              navigator.clipboard.writeText(selection).catch(() => {});
+            }
           } else {
             this.proc?.stdin?.write('\x03');
           }
