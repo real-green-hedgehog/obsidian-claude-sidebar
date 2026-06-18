@@ -6801,6 +6801,13 @@ var TerminalView = class extends import_obsidian.ItemView {
     this.workingDir = null;
     // YOLO mode (--dangerously-skip-permissions)
     this.yoloMode = false;
+    this.statusBar = null;
+    this.sessionStart = null;
+    this._statusTimer = null;
+    this._rlData = null;
+    this._rlFetchTime = 0;
+    this._rlTimer = null;
+    this._apiModel = null;
   }
   getBackend() {
     const key = this.plugin.pluginData.cliBackend || "claude";
@@ -7197,7 +7204,94 @@ var TerminalView = class extends import_obsidian.ItemView {
     const container = this.containerEl;
     container.empty();
     container.addClass("vault-terminal");
+    container.style.position = "relative";
     this.termHost = container.createDiv({ cls: "vault-terminal-host" });
+    this.termHost.style.marginBottom = "22px";
+    this.statusBar = container.createDiv({ cls: "vault-terminal-status" });
+    this.statusBar.style.cssText = "position:absolute;bottom:0;left:0;right:0;z-index:10;height:22px;padding:2px 10px;font-size:11px;font-family:var(--font-monospace);color:var(--text-muted);border-top:1px solid var(--background-modifier-border);background:var(--background-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:18px;user-select:none;";
+    this.updateStatusBar();
+  }
+  updateStatusBar() {
+    if (!this.statusBar) return;
+    const cwd = this.workingDir || this.plugin.pluginData.lastCwd || "";
+    const folder = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
+    const sep = " │ ";
+    const modelLabel = this._apiModel || this.getBackend().label;
+    const parts = [folder, modelLabel];
+    if (this._rlData) {
+      if (this._rlData.h5 !== null) parts.push(`${this._rlData.h5}% (5h)`);
+      if (this._rlData.h7 !== null) parts.push(`${this._rlData.h7}% (7d)`);
+    }
+    if (this.sessionStart) {
+      const sec = Math.floor((Date.now() - this.sessionStart) / 1000);
+      parts.push(sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`);
+    }
+    this.statusBar.setText(parts.join(sep));
+  }
+  _readModelFromSessions(homeDir) {
+    try {
+      const sessDir = path.join(homeDir, ".claude", "sessions");
+      const sessFiles = fs.readdirSync(sessDir)
+        .filter(f => f.endsWith(".json"))
+        .map(f => ({ f, mtime: fs.statSync(path.join(sessDir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime);
+      if (!sessFiles.length) return null;
+      const sess = JSON.parse(fs.readFileSync(path.join(sessDir, sessFiles[0].f), "utf8"));
+      const sessId = sess.sessionId;
+      if (!sessId) return null;
+      const projDir = path.join(homeDir, ".claude", "projects");
+      for (const proj of fs.readdirSync(projDir)) {
+        const jsonlPath = path.join(projDir, proj, `${sessId}.jsonl`);
+        if (!fs.existsSync(jsonlPath)) continue;
+        const stat = fs.statSync(jsonlPath);
+        const readSize = Math.min(8192, stat.size);
+        const buf = Buffer.alloc(readSize);
+        const fd = fs.openSync(jsonlPath, "r");
+        fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
+        fs.closeSync(fd);
+        const lines = buf.toString("utf8").split("\n");
+        for (let i = lines.length - 1; i >= 0; i--) {
+          try {
+            const msg = JSON.parse(lines[i]);
+            if (msg.message?.model) return msg.message.model;
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+  async refreshStatusData() {
+    const now = Date.now();
+    if (now - this._rlFetchTime < 5 * 60 * 1000) return;
+    this._rlFetchTime = now;
+    try {
+      const os = require("os");
+      const homeDir = os.homedir();
+      const model = this._readModelFromSessions(homeDir);
+      if (model) this._apiModel = model;
+      const credsPath = path.join(homeDir, ".claude", ".credentials.json");
+      const creds = JSON.parse(fs.readFileSync(credsPath, "utf8"));
+      const token = creds?.claudeAiOauth?.accessToken;
+      if (!token) return;
+      const resp = await import_obsidian.requestUrl({
+        url: "https://api.anthropic.com/v1/messages",
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "oauth-2025-04-20,claude-code-20250219",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 1, messages: [{ role: "user", content: "." }] })
+      });
+      const h5 = resp.headers["anthropic-ratelimit-unified-5h-utilization"];
+      const h7 = resp.headers["anthropic-ratelimit-unified-7d-utilization"];
+      this._rlData = {
+        h5: h5 != null ? Math.round(parseFloat(h5) * 100) : null,
+        h7: h7 != null ? Math.round(parseFloat(h7) * 100) : null
+      };
+      this.updateStatusBar();
+    } catch (_) {}
   }
   getThemeColors() {
     const styles = getComputedStyle(document.body);
@@ -7232,7 +7326,7 @@ var TerminalView = class extends import_obsidian.ItemView {
       return;
     this.term = new import_xterm.Terminal({
       cursorBlink: true,
-      fontSize: 13,
+      fontSize: this.plugin.pluginData.fontSize ?? 13,
       fontFamily: "Menlo, Monaco, 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', 'Microsoft YaHei', 'SimHei', 'PingFang SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', monospace",
       theme: this.getThemeColors(),
       scrollback: 10000,
@@ -7572,6 +7666,14 @@ var TerminalView = class extends import_obsidian.ItemView {
   }
   startShell(workingDir = null, yoloMode = false, continueSession = false) {
     this.stopShell();
+    this.sessionStart = Date.now();
+    if (this._statusTimer) clearInterval(this._statusTimer);
+    this._statusTimer = setInterval(() => this.updateStatusBar(), 5000);
+    if (this._rlTimer) clearInterval(this._rlTimer);
+    this._rlFetchTime = 0;
+    this._rlTimer = setInterval(() => this.refreshStatusData(), 5 * 60 * 1000);
+    setTimeout(() => this.refreshStatusData(), 3000);
+    this.updateStatusBar();
     const defaultDir = this.plugin.pluginData.defaultWorkingDir;
     const vaultPath = this.plugin.getVaultPath();
     const resolvedDefault = defaultDir ? path.resolve(vaultPath, defaultDir) : vaultPath;
@@ -7808,6 +7910,8 @@ var TerminalView = class extends import_obsidian.ItemView {
     this._isDisposed = true;
     // Kill the PTY FIRST, before any cleanup that could throw and skip it.
     try { this.stopShell(); } catch (_) {}
+    if (this._statusTimer) { clearInterval(this._statusTimer); this._statusTimer = null; }
+    if (this._rlTimer) { clearInterval(this._rlTimer); this._rlTimer = null; }
     this.plugin?._trackedTerminalViews?.delete(this);
     this.resizeObserver?.disconnect();
     this.themeObserver?.disconnect();
@@ -7962,6 +8066,23 @@ var ClaudeSidebarSettingsTab = class extends import_obsidian.PluginSettingTab {
         setTimeout(grow, 0);
       });
     envSetting.settingEl.addClass("claude-sidebar-env-setting");
+    new import_obsidian.Setting(containerEl)
+      .setName("Font size")
+      .setDesc("Terminal font size in pixels.")
+      .addSlider(slider => slider
+        .setLimits(8, 32, 1)
+        .setValue(this.plugin.pluginData.fontSize ?? 13)
+        .setDynamicTooltip()
+        .onChange(async (value) => {
+          this.plugin.pluginData.fontSize = value;
+          await this.plugin.saveData(this.plugin.pluginData);
+          for (const view of Array.from(this.plugin._trackedTerminalViews)) {
+            if (view.term) {
+              view.term.options.fontSize = value;
+              view.fitAddon?.fit();
+            }
+          }
+        }));
   }
 };
 var VaultTerminalPlugin = class extends import_obsidian.Plugin {

@@ -66,6 +66,21 @@
 	font-family: var(--font-monospace);
 }
 
+.vault-terminal-status {
+	flex-shrink: 0;
+	padding: 2px 10px;
+	font-size: 11px;
+	font-family: var(--font-monospace);
+	color: var(--text-muted);
+	border-top: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	line-height: 1.8;
+	user-select: none;
+}
+
 /* IME support: keep textarea positioned near cursor for input method candidate window */
 .vault-terminal-host .xterm .xterm-helper-textarea {
 	/* Allow xterm.js to position the textarea for IME support */
