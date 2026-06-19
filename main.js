@@ -7212,6 +7212,7 @@ var TerminalView = class extends import_obsidian.ItemView {
     this.updateStatusBar();
     container.addEventListener('paste', (e) => {
       if (!this.term) return;
+      if (e.target?.classList?.contains('xterm-helper-textarea')) return;
       const text = e.clipboardData?.getData('text/plain');
       if (text) {
         e.preventDefault();
@@ -7220,6 +7221,7 @@ var TerminalView = class extends import_obsidian.ItemView {
     });
     container.addEventListener('keydown', (e) => {
       if (e.key === 'v' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && this.term) {
+        if (e.target?.classList?.contains('xterm-helper-textarea')) return;
         e.preventDefault();
         try {
           const text = require('electron').clipboard.readText();
