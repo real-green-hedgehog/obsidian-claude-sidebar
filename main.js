@@ -7210,18 +7210,24 @@ var TerminalView = class extends import_obsidian.ItemView {
     this.statusBar = container.createDiv({ cls: "vault-terminal-status" });
     this.statusBar.style.cssText = "position:absolute;bottom:0;left:0;right:0;z-index:10;height:22px;padding:2px 10px;font-size:11px;font-family:var(--font-monospace);color:var(--text-muted);border-top:1px solid var(--background-modifier-border);background:var(--background-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:18px;user-select:none;";
     this.updateStatusBar();
-    container.addEventListener('keydown', (e) => {
-      if ((e.code === 'KeyV' || e.key.toLowerCase() === 'v') && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && this.term) {
-        e.preventDefault();
-        e.stopPropagation();
-        try {
-          const text = require('electron').clipboard.readText();
-          if (text) this.term.paste(text);
-        } catch (_) {
-          navigator.clipboard.readText().then((t) => { if (t) this.term.paste(t); }).catch(() => {});
-        }
+    this._wisprFlowHandler = (e) => {
+      if (!this.term) return;
+      if (!((e.code === 'KeyV' || e.key.toLowerCase() === 'v') && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey)) return;
+      if (!this.containerEl.isConnected) return;
+      const active = document.activeElement;
+      if (active && !this.containerEl.contains(active) && active !== document.body &&
+          (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' ||
+           active.getAttribute?.('contenteditable') === 'true')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try {
+        const text = require('electron').clipboard.readText();
+        if (text) this.term.paste(text);
+      } catch (_) {
+        navigator.clipboard.readText().then((t) => { if (t && this.term) this.term.paste(t); }).catch(() => {});
       }
-    }, true);
+    };
+    document.addEventListener('keydown', this._wisprFlowHandler, true);
   }
   updateStatusBar() {
     if (!this.statusBar) return;
@@ -7958,6 +7964,10 @@ var TerminalView = class extends import_obsidian.ItemView {
         this.scopePushed = false;
       }
       this.escapeScope = null;
+    }
+    if (this._wisprFlowHandler) {
+      document.removeEventListener('keydown', this._wisprFlowHandler, true);
+      this._wisprFlowHandler = null;
     }
     if (this.imagePasteHandler) {
       document.removeEventListener("paste", this.imagePasteHandler, true);
