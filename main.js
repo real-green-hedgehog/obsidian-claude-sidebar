@@ -7222,9 +7222,11 @@ var TerminalView = class extends import_obsidian.ItemView {
       e.stopPropagation();
       try {
         const text = require('electron').clipboard.readText();
-        if (text) this.term.paste(text);
+        if (text) { this.term.paste(text); this.term.focus(); }
       } catch (_) {
-        navigator.clipboard.readText().then((t) => { if (t && this.term) this.term.paste(t); }).catch(() => {});
+        navigator.clipboard.readText().then((t) => {
+          if (t && this.term) { this.term.paste(t); this.term.focus(); }
+        }).catch(() => {});
       }
     };
     document.addEventListener('keydown', this._wisprFlowHandler, true);
