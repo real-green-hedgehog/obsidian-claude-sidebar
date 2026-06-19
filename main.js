@@ -7211,7 +7211,7 @@ var TerminalView = class extends import_obsidian.ItemView {
     this.statusBar.style.cssText = "position:absolute;bottom:0;left:0;right:0;z-index:10;height:22px;padding:2px 10px;font-size:11px;font-family:var(--font-monospace);color:var(--text-muted);border-top:1px solid var(--background-modifier-border);background:var(--background-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:18px;user-select:none;";
     this.updateStatusBar();
     container.addEventListener('keydown', (e) => {
-      if (e.code === 'KeyV' && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && this.term) {
+      if ((e.code === 'KeyV' || e.key.toLowerCase() === 'v') && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && this.term) {
         e.preventDefault();
         e.stopPropagation();
         try {
@@ -7521,7 +7521,7 @@ var TerminalView = class extends import_obsidian.ItemView {
           return true;
         }
         // Windows Ctrl+V: paste from clipboard (Obsidian intercepts this before xterm sees it)
-        if (ev.code === 'KeyV' && ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
+        if ((ev.code === 'KeyV' || ev.key.toLowerCase() === 'v') && ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
           ev.preventDefault();
           try {
             const text = require('electron').clipboard.readText();
