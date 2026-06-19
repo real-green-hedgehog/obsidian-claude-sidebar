@@ -7210,26 +7210,34 @@ var TerminalView = class extends import_obsidian.ItemView {
     this.statusBar = container.createDiv({ cls: "vault-terminal-status" });
     this.statusBar.style.cssText = "position:absolute;bottom:0;left:0;right:0;z-index:10;height:22px;padding:2px 10px;font-size:11px;font-family:var(--font-monospace);color:var(--text-muted);border-top:1px solid var(--background-modifier-border);background:var(--background-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:18px;user-select:none;";
     this.updateStatusBar();
+    const _termPaste = (text) => { if (text && this.term) { this.term.paste(text); this.term.focus(); } };
+    const _isOtherInput = () => {
+      if (!this.containerEl.isConnected) return true;
+      const active = document.activeElement;
+      return active && !this.containerEl.contains(active) && active !== document.body &&
+        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' ||
+         active.getAttribute?.('contenteditable') === 'true');
+    };
     this._wisprFlowHandler = (e) => {
       if (!this.term) return;
       if (!((e.code === 'KeyV' || e.key.toLowerCase() === 'v') && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey)) return;
-      if (!this.containerEl.isConnected) return;
-      const active = document.activeElement;
-      if (active && !this.containerEl.contains(active) && active !== document.body &&
-          (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' ||
-           active.getAttribute?.('contenteditable') === 'true')) return;
+      if (_isOtherInput()) return;
       e.preventDefault();
       e.stopPropagation();
-      try {
-        const text = require('electron').clipboard.readText();
-        if (text) { this.term.paste(text); this.term.focus(); }
-      } catch (_) {
-        navigator.clipboard.readText().then((t) => {
-          if (t && this.term) { this.term.paste(t); this.term.focus(); }
-        }).catch(() => {});
-      }
+      try { _termPaste(require('electron').clipboard.readText()); }
+      catch (_) { navigator.clipboard.readText().then(_termPaste).catch(() => {}); }
+    };
+    this._wisprFlowPasteHandler = (e) => {
+      if (!this.term) return;
+      if (_isOtherInput()) return;
+      const text = e.clipboardData?.getData('text/plain');
+      if (!text) return;
+      e.preventDefault();
+      e.stopPropagation();
+      _termPaste(text);
     };
     document.addEventListener('keydown', this._wisprFlowHandler, true);
+    document.addEventListener('paste', this._wisprFlowPasteHandler, true);
   }
   updateStatusBar() {
     if (!this.statusBar) return;
@@ -7970,6 +7978,10 @@ var TerminalView = class extends import_obsidian.ItemView {
     if (this._wisprFlowHandler) {
       document.removeEventListener('keydown', this._wisprFlowHandler, true);
       this._wisprFlowHandler = null;
+    }
+    if (this._wisprFlowPasteHandler) {
+      document.removeEventListener('paste', this._wisprFlowPasteHandler, true);
+      this._wisprFlowPasteHandler = null;
     }
     if (this.imagePasteHandler) {
       document.removeEventListener("paste", this.imagePasteHandler, true);
