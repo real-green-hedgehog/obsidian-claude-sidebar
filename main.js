@@ -7220,7 +7220,8 @@ var TerminalView = class extends import_obsidian.ItemView {
     };
     this._wisprFlowHandler = (e) => {
       if (!this.term) return;
-      if (!((e.code === 'KeyV' || e.key.toLowerCase() === 'v') && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey)) return;
+      const isV = e.code === 'KeyV' || e.key === 'v' || e.key === 'V' || e.key === 'м' || e.key === 'М';
+      if (!(isV && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey)) return;
       if (_isOtherInput()) return;
       e.preventDefault();
       e.stopPropagation();
