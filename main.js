@@ -8275,7 +8275,13 @@ var VaultTerminalPlugin = class extends import_obsidian.Plugin {
     }
     this.lastActiveTerminalLeaf = null;
     this.layoutReady = false;
-    this.app.workspace.onLayoutReady(() => { this.layoutReady = true; });
+    this.app.workspace.onLayoutReady(() => {
+      this.layoutReady = true;
+      // Auto-restore terminal if it's not already in the workspace
+      if (!this.app.workspace.getLeavesOfType(VIEW_TYPE).length) {
+        this.activateView();
+      }
+    });
 
     // Track the most recently focused Claude tab
     this.registerEvent(
@@ -8603,7 +8609,7 @@ var VaultTerminalPlugin = class extends import_obsidian.Plugin {
   }
   async createNewTab(workingDir = null, yoloMode = false, continueSession = false) {
     if (!this.layoutReady) return;
-    const leaf = this.app.workspace.getRightLeaf(false);
+    const leaf = this.app.workspace.getLeaf('tab');
     if (leaf) {
       const state = {};
       if (workingDir) state.workingDir = workingDir;
@@ -8614,6 +8620,7 @@ var VaultTerminalPlugin = class extends import_obsidian.Plugin {
         active: true,
         state
       });
+      leaf.setPinned(true);
       this.app.workspace.revealLeaf(leaf);
       // Focus the terminal after the leaf is revealed
       setTimeout(() => {
