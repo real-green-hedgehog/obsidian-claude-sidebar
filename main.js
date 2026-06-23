@@ -8009,7 +8009,6 @@ var TerminalView = class extends import_obsidian.ItemView {
             headers: {
               'Authorization': `Bearer ${token}`,
               'anthropic-version': '2023-06-01',
-              'anthropic-beta': 'claude-ai-oauth',
               'Content-Type': 'application/json'
             },
             body: JSON.stringify({
