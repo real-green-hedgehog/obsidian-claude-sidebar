@@ -6804,6 +6804,7 @@ var TerminalView = class extends import_obsidian.ItemView {
     // Status bar
     this.statusEl = null;
     this._statusModel = "—";
+    this._statusConvName = null;
     this._status5h = null;
     this._status7d = null;
     this._statusStartTime = null;
@@ -6880,8 +6881,14 @@ var TerminalView = class extends import_obsidian.ItemView {
       // Refresh status bar (model + rate limits) 3s after start, then every 5min
       setTimeout(() => this.refreshStatusData(), 3000);
       this._statusRefreshInterval = setInterval(() => this.refreshStatusData(), 5 * 60 * 1000);
-      // Update elapsed time every 30s
-      this._statusInterval = setInterval(() => this.updateStatusBar(), 30 * 1000);
+      // Update elapsed time + session info every 30s
+      this._statusInterval = setInterval(async () => {
+        const os = require('os');
+        const { model, convName } = await this._readModelFromSessions(os.homedir());
+        if (model) this._statusModel = model;
+        if (convName) this._statusConvName = convName;
+        this.updateStatusBar();
+      }, 30 * 1000);
       setTimeout(() => {
         try {
           if (!this.proc) {
@@ -7954,22 +7961,33 @@ var TerminalView = class extends import_obsidian.ItemView {
       const elapsed = Math.floor((Date.now() - this._statusStartTime) / 1000);
       const m = Math.floor(elapsed / 60);
       const s = elapsed % 60;
-      parts.push(`${m}:${String(s).padStart(2, '0')}`);
+      parts.push(`⏱ ${m}:${String(s).padStart(2, '0')}`);
     }
+    if (this._statusConvName) parts.push(this._statusConvName);
     this.statusEl.textContent = parts.join(' │ ');
   }
   async _readModelFromSessions(homeDir) {
     try {
       const sessionsDir = path.join(homeDir, '.claude', 'sessions');
       const projectsDir = path.join(homeDir, '.claude', 'projects');
-      if (!fs.existsSync(sessionsDir)) return null;
+      if (!fs.existsSync(sessionsDir)) return {};
       const sessionFiles = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
-      if (!sessionFiles.length) return null;
-      const newest = sessionFiles
+      if (!sessionFiles.length) return {};
+      const newestEntry = sessionFiles
         .map(f => ({ f, mtime: fs.statSync(path.join(sessionsDir, f)).mtimeMs }))
         .sort((a, b) => b.mtime - a.mtime)[0];
-      const sessionId = path.basename(newest.f, '.json');
-      if (!fs.existsSync(projectsDir)) return null;
+      const sessionPath = path.join(sessionsDir, newestEntry.f);
+      let convName = null;
+      let sessionId = path.basename(newestEntry.f, '.json');
+      try {
+        const sessionData = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+        if (sessionData?.name) {
+          const n = sessionData.name.trim();
+          convName = n.length > 40 ? n.slice(0, 38) + '…' : n;
+        }
+        if (sessionData?.sessionId) sessionId = sessionData.sessionId;
+      } catch (_) {}
+      if (!fs.existsSync(projectsDir)) return { convName };
       for (const pd of fs.readdirSync(projectsDir)) {
         const jsonlPath = path.join(projectsDir, pd, sessionId + '.jsonl');
         if (fs.existsSync(jsonlPath)) {
@@ -7984,20 +8002,22 @@ var TerminalView = class extends import_obsidian.ItemView {
             try {
               const obj = JSON.parse(lines[i]);
               const model = obj?.message?.model;
-              if (model) return model;
+              if (model) return { model, convName };
             } catch (_) {}
           }
         }
       }
+      return { convName };
     } catch (_) {}
-    return null;
+    return {};
   }
   async refreshStatusData() {
     try {
       const os = require('os');
       const homeDir = os.homedir();
-      const model = await this._readModelFromSessions(homeDir);
+      const { model, convName } = await this._readModelFromSessions(homeDir);
       if (model) this._statusModel = model;
+      if (convName) this._statusConvName = convName;
       const credPath = path.join(homeDir, '.claude', '.credentials.json');
       if (fs.existsSync(credPath)) {
         const creds = JSON.parse(fs.readFileSync(credPath, 'utf8'));
