@@ -66,19 +66,24 @@
 	font-family: var(--font-monospace);
 }
 
+/* Status bar pinned to bottom of terminal */
 .vault-terminal-status {
-	flex-shrink: 0;
-	padding: 2px 10px;
-	font-size: 11px;
-	font-family: var(--font-monospace);
-	color: var(--text-muted);
-	border-top: 1px solid var(--background-modifier-border);
-	background: var(--background-secondary);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	line-height: 1.8;
-	user-select: none;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 20px;
+  line-height: 20px;
+  padding: 0 12px;
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  color: var(--text-faint);
+  background-color: var(--background-secondary);
+  border-top: 1px solid var(--background-modifier-border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  z-index: 1;
 }
 
 /* IME support: keep textarea positioned near cursor for input method candidate window */

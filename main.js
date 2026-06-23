@@ -6801,13 +6801,17 @@ var TerminalView = class extends import_obsidian.ItemView {
     this.workingDir = null;
     // YOLO mode (--dangerously-skip-permissions)
     this.yoloMode = false;
-    this.statusBar = null;
-    this.sessionStart = null;
-    this._statusTimer = null;
-    this._rlData = null;
-    this._rlFetchTime = 0;
-    this._rlTimer = null;
-    this._apiModel = null;
+    // Status bar
+    this.statusEl = null;
+    this._statusModel = "—";
+    this._status5h = null;
+    this._status7d = null;
+    this._statusStartTime = null;
+    this._statusInterval = null;
+    this._statusRefreshInterval = null;
+    // WisprFlow clipboard handlers (registered on document, removed on dispose)
+    this._wisprFlowHandler = null;
+    this._wisprFlowPasteHandler = null;
   }
   getBackend() {
     const key = this.plugin.pluginData.cliBackend || "claude";
@@ -6847,24 +6851,37 @@ var TerminalView = class extends import_obsidian.ItemView {
     return state;
   }
   async onOpen() {
-    try {
-      // If terminal is still alive from a prior onOpen, just reattach and focus.
-      // Obsidian calls onOpen() each time the view becomes visible; without this
-      // guard, switching panels spawns a fresh Claude process (and banner) every time.
-      if (this.term && !this._isDisposed) {
-        if (this.termHost && !this.termHost.isConnected) {
-          this.buildUI();
-          this.term.open(this.termHost);
-          this.fitAddon?.fit();
-        }
-        this.term.focus();
+    // If terminal is still alive from a prior onOpen, just reattach and focus.
+    // Obsidian calls onOpen() each time the view becomes visible; without this
+    // guard, switching panels spawns a fresh Claude process (and banner) every time.
+    if (this.term && !this._isDisposed) {
+      if (this.termHost && !this.termHost.isConnected) {
+        this.buildUI();
+        this.term.open(this.termHost);
+        this.fitAddon?.fit();
+      }
+      this.term.focus();
+      return;
+    }
+    this._isDisposed = false;
+    this.injectCSS();
+    this.buildUI();
+    // Delay terminal init until layout is ready — prevents xterm from crashing
+    // on Windows when Obsidian restores the tab before the DOM has dimensions.
+    const initAndStart = () => {
+      if (this._isDisposed) return;
+      try {
+        this.initTerminal();
+      } catch (err) {
+        console.error("[Claude Sidebar] Failed to initialize terminal:", err);
         return;
       }
-      this._isDisposed = false;
-      this.injectCSS();
-      this.buildUI();
-      this.initTerminal();
-      // Delay shell start slightly to allow setState() to be called first
+      this._statusStartTime = Date.now();
+      // Refresh status bar (model + rate limits) 3s after start, then every 5min
+      setTimeout(() => this.refreshStatusData(), 3000);
+      this._statusRefreshInterval = setInterval(() => this.refreshStatusData(), 5 * 60 * 1000);
+      // Update elapsed time every 30s
+      this._statusInterval = setInterval(() => this.updateStatusBar(), 30 * 1000);
       setTimeout(() => {
         try {
           if (!this.proc) {
@@ -6875,12 +6892,6 @@ var TerminalView = class extends import_obsidian.ItemView {
           this.term?.writeln(`\r\n[Failed to start shell: ${err.message}]`);
         }
       }, 10);
-      // Defensive: on Windows, Obsidian's layout dispatch can crash silently
-      // during startup (recomputeChildrenDimensions errors), leaving xterm at
-      // stale dimensions without firing ResizeObserver or onLayoutChange.
-      // Gated to win32 because on macOS/Linux these unconditional fits feed
-      // the ResizeObserver loop when multiple terminal leaves restore on
-      // launch (issue #80).
       if (process.platform === "win32") {
         [250, 750, 1500, 3000].forEach((delay) => {
           setTimeout(() => {
@@ -6896,8 +6907,11 @@ var TerminalView = class extends import_obsidian.ItemView {
         });
       }
       this.setupEscapeHandler();
-    } catch (err) {
-      console.error("[Claude Sidebar] Failed to initialize terminal:", err);
+    };
+    if (this.plugin.layoutReady) {
+      initAndStart();
+    } else {
+      this.app.workspace.onLayoutReady(initAndStart);
     }
   }
   setupEscapeHandler() {
@@ -7207,120 +7221,38 @@ var TerminalView = class extends import_obsidian.ItemView {
     container.style.position = "relative";
     this.termHost = container.createDiv({ cls: "vault-terminal-host" });
     this.termHost.style.marginBottom = "22px";
-    this.statusBar = container.createDiv({ cls: "vault-terminal-status" });
-    this.statusBar.style.cssText = "position:absolute;bottom:0;left:0;right:0;z-index:10;height:22px;padding:2px 10px;font-size:11px;font-family:var(--font-monospace);color:var(--text-muted);border-top:1px solid var(--background-modifier-border);background:var(--background-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:18px;user-select:none;";
-    this.updateStatusBar();
-    const _termPaste = (text) => { if (text && this.term) { this.term.paste(text); this.term.focus(); } };
-    const _isOtherInput = () => {
-      if (!this.containerEl.isConnected) return true;
-      const active = document.activeElement;
-      return active && !this.containerEl.contains(active) && active !== document.body &&
-        (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' ||
-         active.getAttribute?.('contenteditable') === 'true');
-    };
+    // Status bar pinned to bottom
+    this.statusEl = container.createDiv({ cls: "vault-terminal-status" });
+    this.statusEl.textContent = "…";
+    // WisprFlow Ctrl+V: synthetic paste events (code='') from voice input tools
     this._wisprFlowHandler = (e) => {
-      if (!this.term) return;
-      const isV = e.code === 'KeyV' || e.key === 'v' || e.key === 'V' || e.key === 'м' || e.key === 'М';
-      if (!(isV && e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey)) return;
-      if (_isOtherInput()) return;
-      e.preventDefault();
+      if (!e.ctrlKey) return;
+      if (!(e.code === 'KeyV' || e.key === 'v' || e.key === 'V' || e.key === 'м' || e.key === 'М')) return;
+      if (this._isOtherInput()) return;
+      if (this._isDisposed || !this.term) return;
       e.stopPropagation();
-      try { _termPaste(require('electron').clipboard.readText()); }
-      catch (_) { navigator.clipboard.readText().then(_termPaste).catch(() => {}); }
+      e.preventDefault();
+      let text = '';
+      try { text = require('electron').clipboard.readText(); } catch (_) {}
+      if (!text) {
+        navigator.clipboard.readText().then(t => { if (t) this.term.paste(t); this.term.focus(); }).catch(() => {});
+        return;
+      }
+      this.term.paste(text);
+      this.term.focus();
     };
     this._wisprFlowPasteHandler = (e) => {
-      if (!this.term) return;
-      if (_isOtherInput()) return;
-      const text = e.clipboardData?.getData('text/plain');
+      if (this._isOtherInput()) return;
+      if (this._isDisposed || !this.term) return;
+      const text = e.clipboardData?.getData('text');
       if (!text) return;
-      e.preventDefault();
       e.stopPropagation();
-      _termPaste(text);
+      e.preventDefault();
+      this.term.paste(text);
+      this.term.focus();
     };
     document.addEventListener('keydown', this._wisprFlowHandler, true);
     document.addEventListener('paste', this._wisprFlowPasteHandler, true);
-  }
-  updateStatusBar() {
-    if (!this.statusBar) return;
-    const cwd = this.workingDir || this.plugin.pluginData.lastCwd || "";
-    const folder = cwd.split(/[\\/]/).filter(Boolean).pop() || cwd;
-    const sep = " │ ";
-    const modelLabel = this._apiModel || this.getBackend().label;
-    const parts = [folder, modelLabel];
-    if (this._rlData) {
-      if (this._rlData.h5 !== null) parts.push(`${this._rlData.h5}% (5h)`);
-      if (this._rlData.h7 !== null) parts.push(`${this._rlData.h7}% (7d)`);
-    }
-    if (this.sessionStart) {
-      const sec = Math.floor((Date.now() - this.sessionStart) / 1000);
-      parts.push(sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`);
-    }
-    this.statusBar.setText(parts.join(sep));
-  }
-  _readModelFromSessions(homeDir) {
-    try {
-      const sessDir = path.join(homeDir, ".claude", "sessions");
-      const sessFiles = fs.readdirSync(sessDir)
-        .filter(f => f.endsWith(".json"))
-        .map(f => ({ f, mtime: fs.statSync(path.join(sessDir, f)).mtimeMs }))
-        .sort((a, b) => b.mtime - a.mtime);
-      if (!sessFiles.length) return null;
-      const sess = JSON.parse(fs.readFileSync(path.join(sessDir, sessFiles[0].f), "utf8"));
-      const sessId = sess.sessionId;
-      if (!sessId) return null;
-      const projDir = path.join(homeDir, ".claude", "projects");
-      for (const proj of fs.readdirSync(projDir)) {
-        const jsonlPath = path.join(projDir, proj, `${sessId}.jsonl`);
-        if (!fs.existsSync(jsonlPath)) continue;
-        const stat = fs.statSync(jsonlPath);
-        const readSize = Math.min(8192, stat.size);
-        const buf = Buffer.alloc(readSize);
-        const fd = fs.openSync(jsonlPath, "r");
-        fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
-        fs.closeSync(fd);
-        const lines = buf.toString("utf8").split("\n");
-        for (let i = lines.length - 1; i >= 0; i--) {
-          try {
-            const msg = JSON.parse(lines[i]);
-            if (msg.message?.model) return msg.message.model;
-          } catch (_) {}
-        }
-      }
-    } catch (_) {}
-    return null;
-  }
-  async refreshStatusData() {
-    const now = Date.now();
-    if (now - this._rlFetchTime < 5 * 60 * 1000) return;
-    this._rlFetchTime = now;
-    try {
-      const os = require("os");
-      const homeDir = os.homedir();
-      const model = this._readModelFromSessions(homeDir);
-      if (model) this._apiModel = model;
-      const credsPath = path.join(homeDir, ".claude", ".credentials.json");
-      const creds = JSON.parse(fs.readFileSync(credsPath, "utf8"));
-      const token = creds?.claudeAiOauth?.accessToken;
-      if (!token) return;
-      const resp = await import_obsidian.requestUrl({
-        url: "https://api.anthropic.com/v1/messages",
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`,
-          "anthropic-version": "2023-06-01",
-          "anthropic-beta": "oauth-2025-04-20,claude-code-20250219",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 1, messages: [{ role: "user", content: "." }] })
-      });
-      const h5 = resp.headers["anthropic-ratelimit-unified-5h-utilization"];
-      const h7 = resp.headers["anthropic-ratelimit-unified-7d-utilization"];
-      this._rlData = {
-        h5: h5 != null ? Math.round(parseFloat(h5) * 100) : null,
-        h7: h7 != null ? Math.round(parseFloat(h7) * 100) : null
-      };
-      this.updateStatusBar();
-    } catch (_) {}
   }
   getThemeColors() {
     const styles = getComputedStyle(document.body);
@@ -7355,7 +7287,8 @@ var TerminalView = class extends import_obsidian.ItemView {
       return;
     this.term = new import_xterm.Terminal({
       cursorBlink: true,
-      fontSize: this.plugin.pluginData.fontSize ?? 13,
+      copyOnSelect: true,
+      fontSize: this.plugin.pluginData.fontSize || 13,
       fontFamily: "Menlo, Monaco, 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', 'Microsoft YaHei', 'SimHei', 'PingFang SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', monospace",
       theme: this.getThemeColors(),
       scrollback: 10000,
@@ -7376,19 +7309,42 @@ var TerminalView = class extends import_obsidian.ItemView {
         if (!line) return callback(void 0);
         const text = line.translateToString(true);
         const links = [];
-        const re = /(?:[\w.\-]+\/)*[\w.\-]+\.\w+/g;
-        let m;
-        while ((m = re.exec(text)) !== null) {
-          const candidate = m[0];
+        const seen = new Set(); // start columns already linked, so the two scans don't double-link
+        const pushLink = (candidate, startIdx0) => {
           const file = this.resolveVaultPath(candidate);
-          if (!file) continue;
-          const start = m.index + 1; // 1-based start column
-          const end = m.index + candidate.length; // 1-based, inclusive last cell
+          if (!file) return false;
+          const start = startIdx0 + 1;              // 1-based start column
+          const end = startIdx0 + candidate.length; // 1-based, inclusive last cell
+          if (seen.has(start)) return true;
+          seen.add(start);
           links.push({
             text: candidate,
             range: { start: { x: start, y }, end: { x: end, y } },
             activate: () => this.openVaultFile(file)
           });
+          return true;
+        };
+        // 1) Backtick-wrapped paths — explicit delimiters, so spaces inside are unambiguous.
+        const reBacktick = /`([^`\r\n]*?\.\w+)`/g;
+        let b;
+        while ((b = reBacktick.exec(text)) !== null) {
+          pushLink(b[1], b.index + 1); // inner content starts one column after the opening backtick
+        }
+        // 2) Unquoted paths. Allow spaces inside segments, then strip leading prose
+        //    words until the remainder resolves to a real file (bounded by word count).
+        const rePlain = /(?:[\w.\- ]+\/)*[\w.\- ]+\.\w+/g;
+        let m;
+        while ((m = rePlain.exec(text)) !== null) {
+          let candidate = m[0];
+          let offset = m.index;
+          if (seen.has(offset + 1)) continue; // already linked by the backtick pass
+          while (candidate) {
+            if (pushLink(candidate, offset)) break;
+            const sp = candidate.indexOf(" ");
+            if (sp === -1) break;
+            offset += sp + 1;
+            candidate = candidate.slice(sp + 1);
+          }
         }
         callback(links.length ? links : void 0);
       }
@@ -7458,15 +7414,63 @@ var TerminalView = class extends import_obsidian.ItemView {
     };
     this.termHost.addEventListener('dragover', this.fileDragOverHandler);
     this.termHost.addEventListener('drop', this.fileDropHandler);
-    // Windows right-click paste: Windows terminal convention is right-click = paste
-    if (process.platform === 'win32') {
-      this.termHost.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
+    // macOS Ctrl+click arrives as a button-0 mousedown WITH ctrlKey (not a real
+    // right-click). xterm treats that as the start of a selection drag: it clears the
+    // current selection (so the menu's Copy would be empty) and, because the matching
+    // mouseup is swallowed by the menu, leaves the terminal stuck mid-drag (the cursor
+    // keeps extending a highlight). Intercept it in the capture phase before xterm's
+    // selection service sees it: stash the live selection for the menu, and stop the
+    // event so no drag starts. The separate contextmenu event still fires, so the menu
+    // opens. Real right-clicks (button 2) don't have this problem; we just stash for them.
+    this.termPreContextHandler = (e) => {
+      const isCtrlClick = process.platform === "darwin" && e.button === 0 && e.ctrlKey;
+      if (!(e.button === 2 || isCtrlClick)) return;
+      this._ctxSelection = this.term?.getSelection() || "";
+      if (isCtrlClick) {
         e.stopPropagation();
-        navigator.clipboard.readText().then((text) => {
-          if (text) this.term.paste(text);
-        }).catch(() => {});
+        e.stopImmediatePropagation();
+      }
+    };
+    this.termHost.addEventListener("mousedown", this.termPreContextHandler, true);
+    // Right-click context menu: Copy (when text is selected) / Paste. Cross-platform —
+    // replaces the old Windows-only right-click-paste so Mac and Linux get a menu too.
+    // Electron clipboard with a navigator.clipboard fallback.
+    this.termContextMenuHandler = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const sel = this._ctxSelection || this.term?.getSelection() || "";
+      this._ctxSelection = "";
+      const menu = new import_obsidian.Menu();
+      menu.addItem((i) => i.setTitle("Copy").setIcon("copy").setDisabled(!sel).onClick(() => {
+        try { require("electron").clipboard.writeText(sel); }
+        catch (_) { navigator.clipboard?.writeText(sel).catch(() => {}); }
+      }));
+      menu.addItem((i) => i.setTitle("Paste").setIcon("clipboard-paste").onClick(async () => {
+        let text = "";
+        try { text = require("electron").clipboard.readText() || ""; }
+        catch (_) { text = (await navigator.clipboard?.readText?.().catch(() => "")) || ""; }
+        if (text) this.term?.paste(text);
+      }));
+      menu.showAtMouseEvent(e);
+    };
+    this.termHost.addEventListener("contextmenu", this.termContextMenuHandler);
+    // Linux primary-selection clipboard (X11 convention): selecting text copies it to the
+    // PRIMARY buffer and middle-click pastes from PRIMARY — a separate clipboard from
+    // Ctrl+C/Ctrl+V. Only Electron's 'selection' clipboard exposes it, and only on Linux.
+    // (Requested by @DZPM on PR #71.) Untested on Linux; isolated and fails silently.
+    if (process.platform === "linux") {
+      this.termPrimarySelectionSub = this.term.onSelectionChange(() => {
+        const sel = this.term?.getSelection();
+        if (sel) { try { require("electron").clipboard.writeText(sel, "selection"); } catch (_) {} }
       });
+      this.termMiddleClickHandler = (e) => {
+        if (e.button !== 1) return; // middle button only
+        e.preventDefault();
+        let text = "";
+        try { text = require("electron").clipboard.readText("selection") || ""; } catch (_) {}
+        if (text) this.term?.paste(text);
+      };
+      this.termHost.addEventListener("auxclick", this.termMiddleClickHandler);
     }
     const isMac = process.platform === 'darwin';
     // Keys the terminal must keep regardless of Obsidian bindings.
@@ -7537,27 +7541,22 @@ var TerminalView = class extends import_obsidian.ItemView {
           }
           return true;
         }
-        // Windows Ctrl+V: paste from clipboard (Obsidian intercepts this before xterm sees it)
-        if ((ev.code === 'KeyV' || ev.key.toLowerCase() === 'v') && ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
+        // Ctrl+V: paste from clipboard (layout-independent via ev.code)
+        if (ev.code === 'KeyV' && ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
           ev.preventDefault();
-          try {
-            const text = require('electron').clipboard.readText();
-            if (text) this.term.paste(text);
-          } catch (_) {
-            navigator.clipboard.readText().then((text) => {
-              if (text) this.term.paste(text);
-            }).catch(() => {});
+          let text = '';
+          try { text = require('electron').clipboard.readText(); } catch (_) {}
+          if (text) { this.term.paste(text); } else {
+            navigator.clipboard.readText().then(t => { if (t) this.term.paste(t); }).catch(() => {});
           }
           return false;
         }
-        // Windows Ctrl+C: copy selection or send interrupt
+        // Ctrl+C: copy selection or send interrupt (layout-independent via ev.code)
         if (ev.code === 'KeyC' && ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey) {
           ev.preventDefault();
           const selection = this.term.getSelection();
           if (selection) {
-            try {
-              require('electron').clipboard.writeText(selection);
-            } catch (_) {
+            try { require('electron').clipboard.writeText(selection); } catch (_) {
               navigator.clipboard.writeText(selection).catch(() => {});
             }
           } else {
@@ -7704,14 +7703,6 @@ var TerminalView = class extends import_obsidian.ItemView {
   }
   startShell(workingDir = null, yoloMode = false, continueSession = false) {
     this.stopShell();
-    this.sessionStart = Date.now();
-    if (this._statusTimer) clearInterval(this._statusTimer);
-    this._statusTimer = setInterval(() => this.updateStatusBar(), 5000);
-    if (this._rlTimer) clearInterval(this._rlTimer);
-    this._rlFetchTime = 0;
-    this._rlTimer = setInterval(() => this.refreshStatusData(), 5 * 60 * 1000);
-    setTimeout(() => this.refreshStatusData(), 3000);
-    this.updateStatusBar();
     const defaultDir = this.plugin.pluginData.defaultWorkingDir;
     const vaultPath = this.plugin.getVaultPath();
     const resolvedDefault = defaultDir ? path.resolve(vaultPath, defaultDir) : vaultPath;
@@ -7943,13 +7934,106 @@ var TerminalView = class extends import_obsidian.ItemView {
       this.stderrDecoder = null;
     }
   }
+  _isOtherInput() {
+    const active = document.activeElement;
+    if (!active) return false;
+    if (this.containerEl.contains(active)) return false;
+    if (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA') return true;
+    if (active.isContentEditable) return true;
+    return false;
+  }
+  updateStatusBar() {
+    if (!this.statusEl) return;
+    const parts = [];
+    const cwd = this.workingDir || this.plugin.pluginData.lastCwd || '';
+    if (cwd) parts.push(path.basename(cwd));
+    parts.push(this._statusModel || '—');
+    if (this._status5h !== null) parts.push(`${Math.round(this._status5h * 100)}% (5h)`);
+    if (this._status7d !== null) parts.push(`${Math.round(this._status7d * 100)}% (7d)`);
+    if (this._statusStartTime) {
+      const elapsed = Math.floor((Date.now() - this._statusStartTime) / 1000);
+      const m = Math.floor(elapsed / 60);
+      const s = elapsed % 60;
+      parts.push(`${m}:${String(s).padStart(2, '0')}`);
+    }
+    this.statusEl.textContent = parts.join(' │ ');
+  }
+  async _readModelFromSessions(homeDir) {
+    try {
+      const sessionsDir = path.join(homeDir, '.claude', 'sessions');
+      const projectsDir = path.join(homeDir, '.claude', 'projects');
+      if (!fs.existsSync(sessionsDir)) return null;
+      const sessionFiles = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+      if (!sessionFiles.length) return null;
+      const newest = sessionFiles
+        .map(f => ({ f, mtime: fs.statSync(path.join(sessionsDir, f)).mtimeMs }))
+        .sort((a, b) => b.mtime - a.mtime)[0];
+      const sessionId = path.basename(newest.f, '.json');
+      if (!fs.existsSync(projectsDir)) return null;
+      for (const pd of fs.readdirSync(projectsDir)) {
+        const jsonlPath = path.join(projectsDir, pd, sessionId + '.jsonl');
+        if (fs.existsSync(jsonlPath)) {
+          const stat = fs.statSync(jsonlPath);
+          const readSize = Math.min(8192, stat.size);
+          const buf = Buffer.alloc(readSize);
+          const fd = fs.openSync(jsonlPath, 'r');
+          fs.readSync(fd, buf, 0, readSize, stat.size - readSize);
+          fs.closeSync(fd);
+          const lines = buf.toString('utf8').split('\n').filter(l => l.trim());
+          for (let i = lines.length - 1; i >= 0; i--) {
+            try {
+              const obj = JSON.parse(lines[i]);
+              const model = obj?.message?.model;
+              if (model) return model;
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+  async refreshStatusData() {
+    try {
+      const os = require('os');
+      const homeDir = os.homedir();
+      const model = await this._readModelFromSessions(homeDir);
+      if (model) this._statusModel = model;
+      const credPath = path.join(homeDir, '.claude', '.credentials.json');
+      if (fs.existsSync(credPath)) {
+        const creds = JSON.parse(fs.readFileSync(credPath, 'utf8'));
+        const token = creds?.claudeAiOauth?.accessToken;
+        if (token) {
+          const resp = await import_obsidian.requestUrl({
+            url: 'https://api.anthropic.com/v1/messages',
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'anthropic-version': '2023-06-01',
+              'anthropic-beta': 'claude-ai-oauth',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              model: 'claude-haiku-4-5-20251001',
+              max_tokens: 1,
+              messages: [{ role: 'user', content: 'hi' }]
+            }),
+            throw: false
+          });
+          const h = resp.headers || {};
+          const h5 = h['anthropic-ratelimit-unified-5h-utilization'];
+          const h7 = h['anthropic-ratelimit-unified-7d-utilization'];
+          if (h5 !== undefined) this._status5h = parseFloat(h5);
+          if (h7 !== undefined) this._status7d = parseFloat(h7);
+        }
+      }
+    } catch (_) {}
+    this.updateStatusBar();
+  }
   dispose() {
     if (this._isDisposed) return;
     this._isDisposed = true;
     // Kill the PTY FIRST, before any cleanup that could throw and skip it.
     try { this.stopShell(); } catch (_) {}
-    if (this._statusTimer) { clearInterval(this._statusTimer); this._statusTimer = null; }
-    if (this._rlTimer) { clearInterval(this._rlTimer); this._rlTimer = null; }
     this.plugin?._trackedTerminalViews?.delete(this);
     this.resizeObserver?.disconnect();
     this.themeObserver?.disconnect();
@@ -7976,14 +8060,6 @@ var TerminalView = class extends import_obsidian.ItemView {
       }
       this.escapeScope = null;
     }
-    if (this._wisprFlowHandler) {
-      document.removeEventListener('keydown', this._wisprFlowHandler, true);
-      this._wisprFlowHandler = null;
-    }
-    if (this._wisprFlowPasteHandler) {
-      document.removeEventListener('paste', this._wisprFlowPasteHandler, true);
-      this._wisprFlowPasteHandler = null;
-    }
     if (this.imagePasteHandler) {
       document.removeEventListener("paste", this.imagePasteHandler, true);
       this.imagePasteHandler = null;
@@ -7996,6 +8072,39 @@ var TerminalView = class extends import_obsidian.ItemView {
       this.termHost.removeEventListener('drop', this.fileDropHandler);
       this.fileDropHandler = null;
     }
+    if (this.termPreContextHandler && this.termHost) {
+      this.termHost.removeEventListener("mousedown", this.termPreContextHandler, true);
+      this.termPreContextHandler = null;
+    }
+    if (this.termContextMenuHandler && this.termHost) {
+      this.termHost.removeEventListener("contextmenu", this.termContextMenuHandler);
+      this.termContextMenuHandler = null;
+    }
+    if (this.termMiddleClickHandler && this.termHost) {
+      this.termHost.removeEventListener("auxclick", this.termMiddleClickHandler);
+      this.termMiddleClickHandler = null;
+    }
+    if (this.termPrimarySelectionSub) {
+      this.termPrimarySelectionSub.dispose?.();
+      this.termPrimarySelectionSub = null;
+    }
+    if (this._wisprFlowHandler) {
+      document.removeEventListener('keydown', this._wisprFlowHandler, true);
+      this._wisprFlowHandler = null;
+    }
+    if (this._wisprFlowPasteHandler) {
+      document.removeEventListener('paste', this._wisprFlowPasteHandler, true);
+      this._wisprFlowPasteHandler = null;
+    }
+    if (this._statusInterval) {
+      clearInterval(this._statusInterval);
+      this._statusInterval = null;
+    }
+    if (this._statusRefreshInterval) {
+      clearInterval(this._statusRefreshInterval);
+      this._statusRefreshInterval = null;
+    }
+    this.statusEl = null;
     this.term?.dispose();
     this.term = null;
     this.fitAddon = null;
@@ -8114,19 +8223,17 @@ var ClaudeSidebarSettingsTab = class extends import_obsidian.PluginSettingTab {
     envSetting.settingEl.addClass("claude-sidebar-env-setting");
     new import_obsidian.Setting(containerEl)
       .setName("Font size")
-      .setDesc("Terminal font size in pixels.")
+      .setDesc("Terminal font size in pixels (8–32).")
       .addSlider(slider => slider
         .setLimits(8, 32, 1)
-        .setValue(this.plugin.pluginData.fontSize ?? 13)
+        .setValue(this.plugin.pluginData.fontSize || 13)
         .setDynamicTooltip()
         .onChange(async (value) => {
           this.plugin.pluginData.fontSize = value;
           await this.plugin.saveData(this.plugin.pluginData);
-          for (const view of Array.from(this.plugin._trackedTerminalViews)) {
-            if (view.term) {
-              view.term.options.fontSize = value;
-              view.fitAddon?.fit();
-            }
+          for (const view of this.plugin._trackedTerminalViews) {
+            if (view.term) view.term.options.fontSize = value;
+            view.fitAddon?.fit();
           }
         }));
   }
