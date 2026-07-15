@@ -6852,6 +6852,20 @@ var TerminalView = class extends import_obsidian.ItemView {
     return state;
   }
   async onOpen() {
+    // Workspace-restore on startup: the layout isn't settled yet, and building
+    // xterm now can trigger Obsidian's recomputeChildrenDimensions error, which
+    // tears the view back down and can abort app load. Defer the real init until
+    // onLayoutReady so a persisted terminal reopens on startup without crashing.
+    if (!this.plugin.layoutReady && !this._deferredOpen) {
+      this._deferredOpen = true;
+      this.app.workspace.onLayoutReady(() => {
+        setTimeout(() => {
+          try { this.onOpen(); }
+          catch (err) { console.error("[Claude Sidebar] Deferred terminal init failed:", err); }
+        }, 50);
+      });
+      return;
+    }
     // If terminal is still alive from a prior onOpen, just reattach and focus.
     // Obsidian calls onOpen() each time the view becomes visible; without this
     // guard, switching panels spawns a fresh Claude process (and banner) every time.
@@ -7906,6 +7920,7 @@ var TerminalView = class extends import_obsidian.ItemView {
         if (this.proc && !this.proc.killed) {
           let winCmd = backend.binary;
           if (yoloMode && backend.yoloFlag) winCmd += ' ' + backend.yoloFlag;
+          if (additionalFlags) winCmd += ' ' + additionalFlags;
           this.proc.stdin?.write(winCmd + '\r');
         }
       }, 1000);
