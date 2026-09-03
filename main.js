@@ -7935,6 +7935,15 @@ var TerminalView = class extends import_obsidian.ItemView {
         if (!isWin && pid) {
           try { process.kill(-pid, sig); return; } catch (_) {}
         }
+        // Windows: `p.kill()` only terminates the wrapper (python -> cmd -> claude
+        // is a chain of separate processes, not a job object), leaving cmd.exe and
+        // claude.exe as orphans. taskkill /T walks the whole tree by PID.
+        if (isWin && pid) {
+          try {
+            (0, import_child_process.spawn)("taskkill", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+            return;
+          } catch (_) {}
+        }
         try { p.kill(sig); } catch (_) {}
       };
       killTree("SIGTERM");
