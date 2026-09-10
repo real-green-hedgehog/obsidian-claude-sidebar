@@ -8726,4 +8726,12 @@ var VaultTerminalPlugin = class extends import_obsidian.Plugin {
     }
     return true;
   }
+  // Like sendTextToTerminal, but also presses Enter so the text actually
+  // runs instead of sitting in the prompt. Meant to be called from outside
+  // this plugin (e.g. a Meta Bind JS button) via
+  // app.plugins.plugins["claude-sidebar-fork"].runCommandInTerminal(text).
+  async runCommandInTerminal(text) {
+    const payload = text.endsWith("\r") ? text : text + "\r";
+    return this.sendTextToTerminal(payload);
+  }
 };
