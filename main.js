@@ -8480,6 +8480,11 @@ var VaultTerminalPlugin = class extends import_obsidian.Plugin {
       }
     });
     this.addCommand({
+      id: "run-abc-dnevnik",
+      name: "Run /abc-dnevnik in Claude",
+      callback: () => this.runCommandInTerminal("/abc-dnevnik")
+    });
+    this.addCommand({
       id: "resume-claude",
       name: "Resume last conversation",
       checkCallback: (checking) => {
