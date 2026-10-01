@@ -6949,6 +6949,18 @@ var TerminalView = class extends import_obsidian.ItemView {
       }
       return true; // Let Obsidian handle it normally
     });
+    // Shift+Tab: Claude Code permission-mode toggle. Obsidian resolves hotkeys
+    // before xterm sees the key, so any command bound to Shift+Tab (e.g.
+    // Templater's "jump to next cursor location") swallows it. The scope is
+    // pushed only while focus is inside the sidebar, so the editor binding
+    // keeps working elsewhere. We send the back-tab sequence ourselves; the
+    // xterm key handler blocks Shift+Tab so it is never sent twice.
+    this.escapeScope.register(['Shift'], 'Tab', () => {
+      if (this.proc && !this.proc.killed) {
+        this.proc.stdin?.write('\x1b[Z');
+      }
+      return false;
+    });
     // Keep the Scope pushed ONLY while focus is inside the sidebar. A pushed
     // Obsidian Scope routes keys through its chain instead of down to the
     // editor, which bypasses CodeMirror's editor-level keymaps (Find Next/
@@ -7550,14 +7562,13 @@ var TerminalView = class extends import_obsidian.ItemView {
         }
         return false; // Block both keydown and keypress
       }
-      // Shift+Tab (back-tab): xterm's evaluateKeyboardEvent sets `cancel` for
-      // plain Tab but not for the shifted case, so the browser's default
-      // "move focus backward" action fires after the escape sequence is
-      // sent, stealing DOM focus from the terminal (e.g. Claude Code's
-      // permission-mode toggle appears to do nothing). Prevent that default
-      // ourselves; xterm still sends \x1b[Z normally.
-      if (ev.key === 'Tab' && ev.shiftKey && ev.type === 'keydown') {
+      // Shift+Tab (back-tab): sent by the escapeScope binding (see
+      // setupEscapeHandler) so Obsidian hotkeys can't swallow it. Block it
+      // here so xterm doesn't send \x1b[Z a second time, and prevent the
+      // browser's default "move focus backward" action.
+      if (ev.key === 'Tab' && ev.shiftKey) {
         ev.preventDefault();
+        return false;
       }
       if (ev.type === 'keydown') {
         // macOS: Option+key produces special characters on international keyboards (e.g. Opt+Q = @ on Spanish)
