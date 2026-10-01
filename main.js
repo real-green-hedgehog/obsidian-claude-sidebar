@@ -7550,6 +7550,15 @@ var TerminalView = class extends import_obsidian.ItemView {
         }
         return false; // Block both keydown and keypress
       }
+      // Shift+Tab (back-tab): xterm's evaluateKeyboardEvent sets `cancel` for
+      // plain Tab but not for the shifted case, so the browser's default
+      // "move focus backward" action fires after the escape sequence is
+      // sent, stealing DOM focus from the terminal (e.g. Claude Code's
+      // permission-mode toggle appears to do nothing). Prevent that default
+      // ourselves; xterm still sends \x1b[Z normally.
+      if (ev.key === 'Tab' && ev.shiftKey && ev.type === 'keydown') {
+        ev.preventDefault();
+      }
       if (ev.type === 'keydown') {
         // macOS: Option+key produces special characters on international keyboards (e.g. Opt+Q = @ on Spanish)
         // xterm's _isThirdLevelShift relies on keypress events which may not fire in Electron,
@@ -8483,6 +8492,11 @@ var VaultTerminalPlugin = class extends import_obsidian.Plugin {
       id: "run-abc-dnevnik",
       name: "Run /abc-dnevnik in Claude",
       callback: () => this.runCommandInTerminal("/abc-dnevnik")
+    });
+    this.addCommand({
+      id: "run-therapy-session",
+      name: "Run /therapy-session in Claude",
+      callback: () => this.runCommandInTerminal("/therapy-session")
     });
     this.addCommand({
       id: "resume-claude",
