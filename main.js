@@ -7379,6 +7379,40 @@ var TerminalView = class extends import_obsidian.ItemView {
             candidate = candidate.slice(sp + 1);
           }
         }
+        // 3) Web URLs -> default browser. Long URLs wrap across rows, so scan the whole
+        //    logical line (wrapped rows joined) and keep the parts that touch row y.
+        const buf = this.term.buffer.active;
+        const cols = this.term.cols;
+        let first = y - 1;
+        while (first > 0 && buf.getLine(first)?.isWrapped) first--;
+        let last = y - 1;
+        while (buf.getLine(last + 1)?.isWrapped) last++;
+        let logical = "";
+        for (let r = first; r <= last; r++) {
+          const l = buf.getLine(r);
+          logical += l ? l.translateToString(r === last) : "";
+        }
+        const reUrl = /https?:\/\/[^\s<>"'`]+/g;
+        let u;
+        while ((u = reUrl.exec(logical)) !== null) {
+          let url = u[0].replace(/[.,;:!?)\]}»]+$/, "");
+          // keep a closing bracket that belongs to the URL, e.g. wiki links like ..._(film)
+          if (/\)$/.test(u[0]) && (url.match(/\(/g) || []).length > (url.match(/\)/g) || []).length) url += ")";
+          const s0 = u.index, e0 = u.index + url.length - 1; // 0-based offsets in logical line
+          const sRow = first + Math.floor(s0 / cols), eRow = first + Math.floor(e0 / cols);
+          if (y - 1 < sRow || y - 1 > eRow) continue;
+          links.push({
+            text: url,
+            range: {
+              start: { x: (s0 % cols) + 1, y: sRow + 1 },
+              end: { x: (e0 % cols) + 1, y: eRow + 1 }
+            },
+            activate: () => {
+              try { require("electron").shell.openExternal(url); }
+              catch (_) { window.open(url, "_blank"); }
+            }
+          });
+        }
         callback(links.length ? links : void 0);
       }
     });
@@ -7672,13 +7706,12 @@ var TerminalView = class extends import_obsidian.ItemView {
       this.app.workspace.setActiveLeaf(already, { focus: true });
       return;
     }
-    const target = mdLeaves.filter((l) => !l.pinned)[0] || mdLeaves[0];
-    if (target) {
-      await target.openFile(file);
-      this.app.workspace.setActiveLeaf(target, { focus: true });
-    } else {
-      await this.app.workspace.getLeaf(true).openFile(file);
-    }
+    // New tab next to the notes, not a replacement of whatever note is open.
+    const anchor = mdLeaves.filter((l) => !l.pinned)[0] || mdLeaves[0];
+    if (anchor) this.app.workspace.setActiveLeaf(anchor, { focus: false });
+    const leaf = anchor ? this.app.workspace.getLeaf("tab") : this.app.workspace.getLeaf(true);
+    await leaf.openFile(file);
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
   }
   fit() {
     if (!this.term || !this.fitAddon) return;
