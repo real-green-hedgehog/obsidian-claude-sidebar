@@ -7338,50 +7338,10 @@ var TerminalView = class extends import_obsidian.ItemView {
     // so arbitrary path-looking text (URLs, code refs, version numbers) stays plain.
     this.term.registerLinkProvider?.({
       provideLinks: (y, callback) => {
-        const line = this.term?.buffer.active.getLine(y - 1);
-        if (!line) return callback(void 0);
-        const text = line.translateToString(true);
-        const links = [];
-        const seen = new Set(); // start columns already linked, so the two scans don't double-link
-        const pushLink = (candidate, startIdx0) => {
-          const file = this.resolveVaultPath(candidate);
-          if (!file) return false;
-          const start = startIdx0 + 1;              // 1-based start column
-          const end = startIdx0 + candidate.length; // 1-based, inclusive last cell
-          if (seen.has(start)) return true;
-          seen.add(start);
-          links.push({
-            text: candidate,
-            range: { start: { x: start, y }, end: { x: end, y } },
-            activate: () => this.openVaultFile(file)
-          });
-          return true;
-        };
-        // 1) Backtick-wrapped paths — explicit delimiters, so spaces inside are unambiguous.
-        const reBacktick = /`([^`\r\n]*?\.\w+)`/g;
-        let b;
-        while ((b = reBacktick.exec(text)) !== null) {
-          pushLink(b[1], b.index + 1); // inner content starts one column after the opening backtick
-        }
-        // 2) Unquoted paths. Allow spaces inside segments, then strip leading prose
-        //    words until the remainder resolves to a real file (bounded by word count).
-        const rePlain = /(?:[\w.\- ]+\/)*[\w.\- ]+\.\w+/g;
-        let m;
-        while ((m = rePlain.exec(text)) !== null) {
-          let candidate = m[0];
-          let offset = m.index;
-          if (seen.has(offset + 1)) continue; // already linked by the backtick pass
-          while (candidate) {
-            if (pushLink(candidate, offset)) break;
-            const sp = candidate.indexOf(" ");
-            if (sp === -1) break;
-            offset += sp + 1;
-            candidate = candidate.slice(sp + 1);
-          }
-        }
-        // 3) Web URLs -> default browser. Long URLs wrap across rows, so scan the whole
-        //    logical line (wrapped rows joined) and keep the parts that touch row y.
-        const buf = this.term.buffer.active;
+        const buf = this.term?.buffer.active;
+        if (!buf || !buf.getLine(y - 1)) return callback(void 0);
+        // Long lines wrap across rows: scan the whole logical line (wrapped rows joined)
+        // and keep only links that touch row y.
         const cols = this.term.cols;
         let first = y - 1;
         while (first > 0 && buf.getLine(first)?.isWrapped) first--;
@@ -7392,26 +7352,49 @@ var TerminalView = class extends import_obsidian.ItemView {
           const l = buf.getLine(r);
           logical += l ? l.translateToString(r === last) : "";
         }
+        const links = [];
+        const taken = []; // [s0, e0] offsets already linked
+        const add = (s0, e0, text, activate) => {
+          if (taken.some(([a, b]) => s0 <= b && e0 >= a)) return false;
+          const sRow = first + Math.floor(s0 / cols), eRow = first + Math.floor(e0 / cols);
+          taken.push([s0, e0]);
+          if (y - 1 < sRow || y - 1 > eRow) return true;
+          links.push({
+            text,
+            range: { start: { x: (s0 % cols) + 1, y: sRow + 1 }, end: { x: (e0 % cols) + 1, y: eRow + 1 } },
+            activate
+          });
+          return true;
+        };
+        // 1) Web URLs -> default browser.
         const reUrl = /https?:\/\/[^\s<>"'`]+/g;
         let u;
         while ((u = reUrl.exec(logical)) !== null) {
           let url = u[0].replace(/[.,;:!?)\]}»]+$/, "");
           // keep a closing bracket that belongs to the URL, e.g. wiki links like ..._(film)
           if (/\)$/.test(u[0]) && (url.match(/\(/g) || []).length > (url.match(/\)/g) || []).length) url += ")";
-          const s0 = u.index, e0 = u.index + url.length - 1; // 0-based offsets in logical line
-          const sRow = first + Math.floor(s0 / cols), eRow = first + Math.floor(e0 / cols);
-          if (y - 1 < sRow || y - 1 > eRow) continue;
-          links.push({
-            text: url,
-            range: {
-              start: { x: (s0 % cols) + 1, y: sRow + 1 },
-              end: { x: (e0 % cols) + 1, y: eRow + 1 }
-            },
-            activate: () => {
-              try { require("electron").shell.openExternal(url); }
-              catch (_) { window.open(url, "_blank"); }
-            }
+          add(u.index, u.index + url.length - 1, url, () => {
+            try { require("electron").shell.openExternal(url); }
+            catch (_) { window.open(url, "_blank"); }
           });
+        }
+        // 2) Vault file paths. Paths contain Cyrillic, spaces, dashes, «», commas — no
+        //    character class covers them, and inline-code backticks are stripped by the
+        //    renderer. So: find a file extension, then walk candidate starts (word
+        //    boundaries) left to right — longest first — and link the first one that
+        //    resolves to a real vault file.
+        const reExt = /\.[A-Za-z0-9]{1,8}(?=$|[\s`'"»)\],;:!?]|\.(?:\s|$))/g;
+        let m;
+        while ((m = reExt.exec(logical)) !== null) {
+          const e1 = m.index + m[0].length; // exclusive end
+          const from = Math.max(0, e1 - 300);
+          for (let s = from; s < m.index; s++) {
+            if (s > 0 && !/[\s`'"«(\[:]/.test(logical[s - 1])) continue;
+            if (/\s/.test(logical[s])) continue;
+            const candidate = logical.slice(s, e1);
+            const file = this.resolveVaultPath(candidate);
+            if (file) { add(s, e1 - 1, candidate, () => this.openVaultFile(file)); break; }
+          }
         }
         callback(links.length ? links : void 0);
       }
