@@ -7342,28 +7342,51 @@ var TerminalView = class extends import_obsidian.ItemView {
         if (!buf || !buf.getLine(y - 1)) return callback(void 0);
         // Long lines wrap across rows: scan the whole logical line (wrapped rows joined)
         // and keep only links that touch row y.
+        // Claude Code also hard-wraps long unbreakable tokens (URLs) itself: the row is
+        // filled to the edge and the rest continues on the next row after the indent,
+        // with isWrapped=false. Treat such rows as one logical line too (indent dropped).
         const cols = this.term.cols;
+        const rowText = (r) => buf.getLine(r)?.translateToString(true) ?? "";
+        // A row counts as hard-wrapped only if it runs (almost) to the edge and ends in a
+        // long unbroken token — prose wraps at spaces, so ordinary lines never join.
+        const fullRow = (r) => {
+          const t = rowText(r);
+          if (t.length < cols - 10) return false;
+          const tail = t.match(/\S+$/)?.[0] || "";
+          return tail.length >= 20 || tail.includes("://");
+        };
+        const hardNext = (r) => {
+          const n = buf.getLine(r + 1);
+          if (!n || n.isWrapped || !fullRow(r)) return false;
+          return /^\s*\S/.test(rowText(r + 1));
+        };
         let first = y - 1;
-        while (first > 0 && buf.getLine(first)?.isWrapped) first--;
+        while (first > 0 && (buf.getLine(first)?.isWrapped || hardNext(first - 1))) first--;
         let last = y - 1;
-        while (buf.getLine(last + 1)?.isWrapped) last++;
+        while (buf.getLine(last + 1)?.isWrapped || hardNext(last)) last++;
         let logical = "";
+        const segs = []; // { r, off, indent }: logical offset where row r starts, cells skipped
         for (let r = first; r <= last; r++) {
           const l = buf.getLine(r);
-          logical += l ? l.translateToString(r === last) : "";
+          let t = l ? l.translateToString(!buf.getLine(r + 1)?.isWrapped) : "";
+          let indent = 0;
+          if (r > first && !l?.isWrapped) { indent = t.length - t.trimStart().length; t = t.slice(indent); }
+          segs.push({ r, off: logical.length, indent });
+          logical += t;
         }
+        const cellOf = (off) => {
+          let s = segs[0];
+          for (const g of segs) { if (g.off <= off) s = g; else break; }
+          return { x: s.indent + (off - s.off) + 1, y: s.r + 1 };
+        };
         const links = [];
         const taken = []; // [s0, e0] offsets already linked
         const add = (s0, e0, text, activate) => {
           if (taken.some(([a, b]) => s0 <= b && e0 >= a)) return false;
-          const sRow = first + Math.floor(s0 / cols), eRow = first + Math.floor(e0 / cols);
+          const start = cellOf(s0), end = cellOf(e0);
           taken.push([s0, e0]);
-          if (y - 1 < sRow || y - 1 > eRow) return true;
-          links.push({
-            text,
-            range: { start: { x: (s0 % cols) + 1, y: sRow + 1 }, end: { x: (e0 % cols) + 1, y: eRow + 1 } },
-            activate
-          });
+          if (y < start.y || y > end.y) return true;
+          links.push({ text, range: { start, end }, activate });
           return true;
         };
         // 0a) obsidian:// URIs -> open the vault file directly if the URI points to one,
