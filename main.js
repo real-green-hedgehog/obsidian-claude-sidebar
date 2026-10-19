@@ -7366,6 +7366,29 @@ var TerminalView = class extends import_obsidian.ItemView {
           });
           return true;
         };
+        // 0a) obsidian:// URIs -> open the vault file directly if the URI points to one,
+        //     otherwise hand the URI to the OS (Obsidian handles its own scheme).
+        const reObs = /obsidian:\/\/[^\s<>"'`]+/g;
+        let o;
+        while ((o = reObs.exec(logical)) !== null) {
+          let uri = o[0].replace(/[.,;:!?)\]}»]+$/, "");
+          // encodeURIComponent leaves ( ) as is: keep a closing bracket that belongs to the URI
+          if (/\)$/.test(o[0]) && (uri.match(/\(/g) || []).length > (uri.match(/\)/g) || []).length) uri += ")";
+          add(o.index, o.index + uri.length - 1, uri, () => {
+            const file = this.resolveObsidianUri(uri);
+            if (file) { this.openVaultFile(file); return; }
+            try { require("electron").shell.openExternal(uri); }
+            catch (_) { window.open(uri, "_blank"); }
+          });
+        }
+        // 0b) Wiki links [[target#heading|alias]] / ![[...]] -> vault file. Only linked if
+        //     the target resolves, so code like arr[[i]] stays plain.
+        const reWiki = /!?\[\[([^\[\]|#^\n]+)(?:[#^][^\[\]|]*)?(?:\|[^\[\]]*)?\]\]/g;
+        let w;
+        while ((w = reWiki.exec(logical)) !== null) {
+          const file = this.resolveWikiTarget(w[1].trim());
+          if (file) add(w.index, w.index + w[0].length - 1, w[0], () => this.openVaultFile(file));
+        }
         // 1) Web URLs -> default browser.
         const reUrl = /https?:\/\/[^\s<>"'`]+/g;
         let u;
@@ -7679,6 +7702,26 @@ var TerminalView = class extends import_obsidian.ItemView {
     const dest = this.app.metadataCache.getFirstLinkpathDest(candidate, "");
     if (dest instanceof import_obsidian.TFile) return dest;
     return null;
+  }
+  // Wiki-link target -> vault file. Targets are often relative to the note they were
+  // written for ("../Тексты/X"); without that note, drop leading ./ ../ and fall back
+  // to the basename.
+  resolveWikiTarget(target) {
+    if (!target) return null;
+    const stripped = target.replace(/^(?:\.\.?\/)+/, "");
+    return this.resolveVaultPath(target) || this.resolveVaultPath(stripped)
+      || this.resolveVaultPath(stripped.split("/").pop());
+  }
+  // obsidian://open?vault=...&file=... -> vault file, or null (other vaults, &path=
+  // absolute paths and other actions are left to Obsidian's own URI handler).
+  resolveObsidianUri(uri) {
+    try {
+      const params = new URL(uri).searchParams;
+      const vault = params.get("vault");
+      if (vault && vault !== this.app.vault.getName()) return null;
+      const target = params.get("file");
+      return target ? this.resolveWikiTarget(target) : null;
+    } catch (_) { return null; }
   }
   // Open (or focus, if already open) a vault file in a markdown leaf — never replaces the
   // terminal leaf. Mirrors the leaf-selection logic in toggleFocus().
