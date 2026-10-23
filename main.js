@@ -7297,7 +7297,23 @@ var TerminalView = class extends import_obsidian.ItemView {
     const selectionBackground = isLightMode ? "rgba(0, 100, 200, 0.3)" : undefined;
     return { background: bg, foreground: fg, cursor, selectionBackground };
   }
+  getFontFamily() {
+    // Same monospace font as Obsidian (Settings → Appearance → Monospace font),
+    // so the terminal matches code blocks/editor instead of a hardcoded stack.
+    const fallback = "Menlo, Monaco, 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', 'Microsoft YaHei', 'SimHei', 'PingFang SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', monospace";
+    const obsidianFont = getComputedStyle(document.body).getPropertyValue("--font-monospace").trim();
+    return obsidianFont ? `${obsidianFont}, ${fallback}` : fallback;
+  }
+  updateFont() {
+    if (!this.term) return;
+    const font = this.getFontFamily();
+    if (this.term.options.fontFamily !== font) {
+      this.term.options.fontFamily = font;
+      this.fitAddon?.fit();
+    }
+  }
   updateTheme() {
+    this.updateFont();
     if (!this.term) return;
     const newTheme = this.getThemeColors();
     const cur = this.term.options.theme;
@@ -7322,7 +7338,7 @@ var TerminalView = class extends import_obsidian.ItemView {
       cursorBlink: true,
       copyOnSelect: true,
       fontSize: this.plugin.pluginData.fontSize || 13,
-      fontFamily: "Menlo, Monaco, 'Cascadia Mono', 'Cascadia Code', Consolas, 'Courier New', 'Microsoft YaHei', 'SimHei', 'PingFang SC', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', monospace",
+      fontFamily: this.getFontFamily(),
       theme: this.getThemeColors(),
       scrollback: 10000,
       macOptionIsMeta: false
@@ -8408,6 +8424,13 @@ var VaultTerminalPlugin = class extends import_obsidian.Plugin {
         this.activateView();
       }
     });
+
+    // Obsidian fires css-change when fonts/theme/snippets change in Appearance
+    this.registerEvent(
+      this.app.workspace.on('css-change', () => {
+        for (const view of this._trackedTerminalViews) view.updateTheme();
+      })
+    );
 
     // Track the most recently focused Claude tab
     this.registerEvent(
